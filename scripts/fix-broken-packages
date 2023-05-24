@@ -1,32 +1,59 @@
 #!/bin/bash
-set +e
-while [[ ! -b /dev/$disk ]] ; do
-    echo $(ls /sys/block/* | grep "[0-9]$")
-    echo -n "Rootfs partition >>> "
-    read disk
+set -e  # Exit immediately if a command exits with a non-zero status
+
+# Prompt user for rootfs partition
+while [[ ! -b "/dev/$disk" ]]; do
+  lsblk -rno NAME | grep -E '[0-9]$'
+  read -rp "Rootfs partition >>> " disk
 done
-mount /dev/$disk /mnt
+
+# Mount necessary filesystems
+mount "/dev/$disk" /mnt
 mount --bind /dev /mnt/dev
 mount --bind /dev/pts /mnt/dev/pts
 mount --bind /sys /mnt/sys
 mount --bind /proc /mnt/proc
-[[ ! -d /mnt/var/lib/dpkg ]] && exit 1
-cat /etc/resolv.conf > /mnt/etc/resolv.conf
+
+# Check if /var/lib/dpkg directory exists
+if [[ ! -d /mnt/var/lib/dpkg ]]; then
+  echo "Error: /var/lib/dpkg directory not found."
+  umount -lf /mnt/dev/pts 2>/dev/null || true
+  umount -lf /mnt/dev 2>/dev/null || true
+  umount -lf /mnt/sys 2>/dev/null || true
+  umount -lf /mnt/proc 2>/dev/null || true
+  umount -lf /mnt 2>/dev/null || true
+  exit 1
+fi
+
+# Copy current DNS configuration
+cp /etc/resolv.conf /mnt/etc/resolv.conf
+
+# Prepare apt sources list directory
 rm -rf /mnt/etc/apt/sources.list.d
 mkdir -p /mnt/etc/apt/sources.list.d
+
+# Clean apt cache
 rm -rf /mnt/var/lib/apt/lists/*
+
+# Update package lists and fix broken packages
 export DEBIAN_FRONTEND=noninteractive
 chroot /mnt apt update
 chroot /mnt apt install -f -y
-chroot /mnt dpkg -l | grep "^i[A-Z]" | tr -s " " | cut -f 2 -d " " | while read package ; do
-    chroot /mnt dpkg --configure -a
-    chroot /mnt dpkg -r --force-depends $package
-    chroot /mnt apt install -f --allow-downgrades --allow-change-held-packages -o Dpkg::Options::="--force-confnew" -y
+
+# Configure and remove broken packages
+chroot /mnt dpkg --configure -a
+chroot /mnt dpkg -l | awk '/^ii/ { print $2 }' | while read -r package; do
+  chroot /mnt dpkg --purge "$package"
+  chroot /mnt apt install -f --allow-downgrades --allow-change-held-packages -o Dpkg::Options::="--force-confnew" -y
 done
+
+# Cleanup and unmount filesystems
 sync
-for dir in dev/pts dev sys proc ; do
-    while umount -lf "/mnt/$dir" 2>/dev/null; do : ;done
+for dir in dev/pts dev sys proc; do
+  while umount -lf "/mnt/$dir" 2>/dev/null; do :; done
 done
-umount -lf /mnt  2>/dev/null
-echo -en "\033[32;1mPress any key to continue\033[;0m"
-read -n 1 
+umount -lf /mnt 2>/dev/null
+
+# Prompt user to continue
+echo -e "\033[32;1mPress any key to continue\033[0m"
+read -rn 1
